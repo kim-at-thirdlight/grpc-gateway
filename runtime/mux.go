@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/internal/httprule"
+	"github.com/grpc-ecosystem/grpc-gateway/v2/utilities"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -193,6 +194,13 @@ func (s *ServeMux) HandlePath(meth string, pathPattern string, h HandlerFunc) er
 	return nil
 }
 
+// ReprioritisePaths 'intelligently' reprioritises the order of REST handler paths
+func (s *ServeMux) ReprioritisePaths() {
+	for meth, handlers := range s.handlers {
+		s.handlers[meth] = sortHandlers(handlers)
+	}
+}
+
 // ServeHTTP dispatches the request to the first handler whose pattern matches to r.Method and r.Path.
 func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -296,4 +304,62 @@ func (s *ServeMux) isPathLengthFallback(r *http.Request) bool {
 type handler struct {
 	pat Pattern
 	h   HandlerFunc
+}
+
+func sortHandlers(handlers []handler) []handler {
+	return orderHandlersByOpCodeAtIndex(handlers, 0)
+}
+
+func orderHandlersByOpCodeAtIndex(handlers []handler, i int) []handler {
+	sorted := []handler{}
+	keyed := keyHandlersByOpCode(handlers, i)
+
+	// This, is not nice... But we can't just loop through
+	// keys,vals because it's not as simple as priority
+	// being directly related to int value of utilities.OpCode
+	h, ok := keyed[-1]
+	if ok {
+		sorted = append(sorted, h...)
+	}
+	h, ok = keyed[utilities.OpEnd]
+	if ok {
+		sorted = append(sorted, h...)
+	}
+	h, ok = keyed[utilities.OpPushM]
+	if ok {
+		sorted = append(sorted, orderHandlersByOpCodeAtIndex(h, i+1)...)
+	}
+	h, ok = keyed[utilities.OpLitPush]
+	if ok {
+		sorted = append(sorted, orderHandlersByOpCodeAtIndex(h, i+1)...)
+	}
+	h, ok = keyed[utilities.OpPush]
+	if ok {
+		sorted = append(sorted, orderHandlersByOpCodeAtIndex(h, i+1)...)
+	}
+	h, ok = keyed[utilities.OpConcatN]
+	if ok {
+		sorted = append(sorted, orderHandlersByOpCodeAtIndex(h, i+1)...)
+	}
+	h, ok = keyed[utilities.OpCapture]
+	if ok {
+		sorted = append(sorted, orderHandlersByOpCodeAtIndex(h, i+1)...)
+	}
+
+	return sorted
+}
+
+func keyHandlersByOpCode(handlers []handler, i int) map[utilities.OpCode]([]handler) {
+	m := map[utilities.OpCode]([]handler){}
+	for _, h := range handlers {
+		var key utilities.OpCode
+		if i >= len(h.pat.ops) {
+			// pattern too short, store under invalid code
+			key = -1
+		} else {
+			key = h.pat.ops[i].code
+		}
+		m[key] = append(m[key], h)
+	}
+	return m
 }
